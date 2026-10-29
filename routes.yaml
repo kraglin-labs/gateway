@@ -1,0 +1,6 @@
+route:
+  - pathprefix: "/changed"
+    upstreamurl: "http://127.0.0.1:4001"
+
+  - pathprefix: "/orders"
+    upstreamurl: "http://127.0.0.1:5002"
