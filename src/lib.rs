@@ -7,6 +7,7 @@ use std::sync::mpsc::channel;
 use tokio::sync::watch;
 use axum::extract::State;
 use axum::response::IntoResponse;
+use std::time::{Instant, Duration}; 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteRole {
@@ -32,7 +33,6 @@ pub fn yaml_parser(file: File) -> std::result::Result<GatewayConfig, Errors> {
 	Ok(config)
 }
 
-use std::time::{Instant, Duration}; 
 pub fn watcher(path: &str, config_tx: watch::Sender<GatewayConfig>) -> Result<()> {
     let (tx, rx) = channel();
 
@@ -105,18 +105,31 @@ pub async fn proxy_handler(
     let upstream_url = {
         let config = config_rx.borrow();
         let path = req.uri().path();
-        
-        let mut match_upstream = None;
+        let mut best_match: Option<&RouteRole> = None;
         for route in &config.route {
-            if path.starts_with(&route.pathprefix) {
-                match_upstream = Some(route.upstreamurl.clone());
-                break;
-            }
+        	let is_match = if route.pathprefix == "/" {
+        		true
+        	} else if path == route.pathprefix {
+        		true
+        	} else if path.starts_with(&route.pathprefix) {
+        		let next_character = path[route.pathprefix.len()..].chars().next();
+        		next_character == Some('/')
+        	} else {
+        		false
+        	};
+        	if is_match {
+        		let should_update = match best_match {
+        			None => true,
+        			Some(current_best) => route.pathprefix.len() > current_best.pathprefix.len(),
+        		};
+        		if should_update {
+        			best_match = Some(route)
+        		}
+        	}
         }
-
-        match match_upstream {
-            Some(url) => url,
-            None => return axum::http::StatusCode::NOT_FOUND.into_response(),
+        match best_match {
+        	Some(route) => route.upstreamurl.clone(),
+        	None => return axum::http::StatusCode::NOT_FOUND.into_response(),
         }
     };
 
