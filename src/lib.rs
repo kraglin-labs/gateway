@@ -96,7 +96,13 @@ pub fn watcher(path: &str, config_tx: watch::Sender<GatewayConfig>) -> Result<()
     Ok(())
 }
 
-
+fn get_http_client() -> reqwest::Client{
+	reqwest::Client::builder()
+		.timeout(Duration::from_secs(30))
+		.pool_max_idle_per_host(10)
+		.build()
+		.unwrap_or_default()
+}
 #[axum::debug_handler]
 pub async fn proxy_handler(
     State(config_rx): State<watch::Receiver<GatewayConfig>>, 
@@ -106,6 +112,7 @@ pub async fn proxy_handler(
         let config = config_rx.borrow();
         let path = req.uri().path();
         let mut best_match: Option<&RouteRole> = None;
+        
         for route in &config.route {
         	let is_match = if route.pathprefix == "/" {
         		true
@@ -137,20 +144,42 @@ pub async fn proxy_handler(
     let target_url = format!("{}{}", upstream_url, path_and_query);
     
     let (parts, body) = req.into_parts();
-    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
+    const MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
+    let body_bytes = match axum::body::to_bytes(body, MAX_BODY_SIZE).await {
         Ok(bytes) => bytes,
-        Err(_) => return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(_) => return axum::http::StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
 
-    let client = reqwest::Client::new();
-    let upstream_req = client.request(parts.method, &target_url)
-        .headers(parts.headers)
+	let mut headers = parts.headers;
+	let hop_by_hop_headers = [
+		"connection",
+		"keep-alive",
+		"proxy-authenticate",
+		"proxy-authorization",
+		"te",
+		"trailer",
+		"transfer-encoding",
+		"upgrade",
+	];
+	for header in &hop_by_hop_headers {
+		headers.remove(*header);
+	}
+	
+    let client = get_http_client();
+    
+    let upstream_req = client
+    	.request(parts.method, &target_url)
+        .headers(headers.clone())
         .body(body_bytes);
 
     match upstream_req.send().await {
         Ok(upstream_resp) => {
             let status = upstream_resp.status();
-            let headers = upstream_resp.headers().clone();
+            let mut response_headers = upstream_resp.headers().clone();
+
+            for header in &hop_by_hop_headers {
+            	response_headers.remove(*header);
+            }
             
             let bytes = match upstream_resp.bytes().await {
                 Ok(b) => b,
@@ -159,13 +188,19 @@ pub async fn proxy_handler(
 
             let mut response_builder = axum::response::Response::builder().status(status);
 
-            for (key, value) in headers.iter() {
+            for (key, value) in response_headers.iter() {
                 response_builder = response_builder.header(key, value);
             }
 
             response_builder.body(axum::body::Body::from(bytes))
                 .unwrap_or_else(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
-        Err(_) => axum::http::StatusCode::BAD_GATEWAY.into_response(),
+        Err(e) => {
+        	if e.is_timeout() {
+        		axum::http::StatusCode::GATEWAY_TIMEOUT.into_response()
+        	} else {
+        		axum::http::StatusCode::BAD_GATEWAY.into_response()
+        	}
+        }
     }
 }
