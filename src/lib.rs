@@ -50,49 +50,84 @@ pub fn watcher(path: &str, config_tx: watch::Sender<GatewayConfig>) -> Result<()
         Config::default(),
     )?;
 
-    let target = Path::new(path);
-    watcher.watch(target, RecursiveMode::NonRecursive)?;
+    let target_path = Path::new(path);
+    let absolute_target = if target_path.is_absolute() {
+        target_path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(target_path)
+    };
 
-    println!("Monitoring directory {:?}", target.canonicalize()?);
+    let watch_dir = absolute_target.parent().unwrap_or(Path::new("."));
+    watcher.watch(watch_dir, RecursiveMode::NonRecursive)?;
+
+    println!("Monitoring directory {:?}", absolute_target.canonicalize()?);
     println!("Use ctrl+c to stop this madness");
 
-    let mut last_reload = Instant::now();
+    let target_file_name = absolute_target.file_name().unwrap_or_default();
+    let debounce_duration = Duration::from_millis(300);
+    let mut pending_reload = false;
+    let mut last_event_time = Instant::now();
 
-    for res in rx {
-        let mut triggered = false;
-        for path in res.paths {
-            if path.ends_with("routes.yaml") {
-                triggered = true;
-                break;
-            }
-        }
-
-        if triggered {
-            if last_reload.elapsed() < Duration::from_millis(300) {
-                continue;
-            }
-
-            println!("routes.yaml changed. we've gotta reload now :(");
-
-            match File::open("routes.yaml") {
-                Ok(file) => {
-                    match yaml_parser(file) {
-                        Ok(new_configuration) => {
-                            if let Err(e) = config_tx.send(new_configuration) {
-                                eprintln!("Ummmm, bad news: Failed to broadcast new config: {:?}", e);
-                            } else {
-                                println!("Gateway reconfiguration was successful.");
-                                last_reload = Instant::now(); 
+    loop {
+        let timeout = if pending_reload {
+            let elapsed = last_event_time.elapsed();
+            if elapsed >= debounce_duration {
+                pending_reload = false;
+                println!("routes.yaml changed, now we've gotta reload");
+                match File::open(&absolute_target) {
+                    Ok(file) => {
+                        match yaml_parser(file) {
+                            Ok(new_config) => {
+                                if let Err(e) = config_tx.send(new_config) {
+                                    eprintln!("Umm, bad news: Failed to broadcast new config: {:?}", e);
+                                } else {
+                                    println!("gateway reconfiguration was successful");
+                                }
                             }
-                        },
-                        Err(e) => eprintln!("YAML parser failed while tryna reload: {:?}", e),
-                    }
+                            Err(e) => eprintln!("YAML parser failed while tryna reload: {:?}", e),
+                        }
+                    } 
+                    Err(e) => eprintln!("Failed to open file: {:?}", e),
                 }
-                Err(e) => eprintln!("Failed to open file: {:?}", e),
+
+                None
+            } else {
+                Some(debounce_duration - elapsed)
+            }
+        } else {
+            None
+        };
+
+        let event_result = match timeout {
+            Some(duration) => {
+                match rx.recv_timeout(duration) {
+                    Ok(smn) => Some(smn),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            None => {
+                match rx.recv() {
+                    Ok(smn) => Some(smn),
+                    Err(_) => break,
+                }
+            }
+        };
+
+        if let Some(event) = event_result {
+            let mut matches_target = false;
+            for p in event.paths {
+                if p.file_name() == Some(target_file_name) {
+                    matches_target = true;
+                    break;
+                }
+            }
+            if matches_target {
+                pending_reload = true;
+                last_event_time = Instant::now();
             }
         }
     }
-
     Ok(())
 }
 
