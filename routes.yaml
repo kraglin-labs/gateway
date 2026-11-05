@@ -4,3 +4,6 @@ route:
 
   - pathprefix: "/orders"
     upstreamurl: "http://127.0.0.1:5002"
+    
+  - pathprefix: "/login"
+    upstreamurl: "http://127.0.0.1:3000"
