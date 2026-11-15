@@ -9,4 +9,4 @@ route:
     upstreamurl: "http://127.0.0.1:3000"
 
   - pathprefix: "/signup"
-    upstreamurl: "http://127.0.0.1:3001"
+    upstreamurl: "http://127.0.0.1:5001"
