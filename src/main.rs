@@ -1,6 +1,7 @@
 use std::fs::File;
 use tokio::sync::watch;
 
+// Main func
 #[tokio::main]
 async fn main() {
     let initial_file = File::open("routes.yaml").expect("Failed to find routes.yaml at startup!");
@@ -21,5 +22,6 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:2026").await.unwrap();
     println!("Edge API Gateway running on http://127.0.0.1:2026");
 
+    // Listener
     axum::serve(listener, app).await.unwrap();
 }
